@@ -1,4 +1,4 @@
-# Kinesis Handler
+# Kinesis Lambda Service
 
 This AWS Kinesis event handler service is designed to process and react to various types of events published to a Kinesis stream. It utilizes the Command Query Responsibility Segregation (CQRS) pattern to separate the reading and update operations for improved scalability and maintainability. The service features an AWS Kinesis client for event publishing and supports both DynamoDB and in-memory storage for event data persistence.
 
