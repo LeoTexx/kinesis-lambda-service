@@ -18,7 +18,6 @@ ENV DB=inMemory
 
 COPY --from=build /tmp/build ./
 COPY  --from=build /tmp/node_modules ./node_modules
-COPY --from=build /tmp/config ./config
 COPY --from=build /tmp/src ./src
 
 COPY ./entrypoint.sh ./entrypoint.sh
