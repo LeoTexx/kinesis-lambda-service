@@ -1,0 +1,670 @@
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/clients/aws-kinesis-client.ts
+import { Kinesis, PutRecordInput } from '@aws-sdk/client-kinesis'
+import { NodeHttpHandler } from '@smithy/node-http-handler'
+import { Log } from '../services/logger'
+
+export class AWSKinesisClient {
+	private kinesis: Kinesis
+	private log: Log
+	private streamName = 'user-limit-events'
+
+	constructor(streamName: string, eventId?: string) {
+		this.kinesis = new Kinesis({
+			endpoint: 'http://host.docker.internal:4567',
+			credentials: {
+				accessKeyId: 'your-access-key-id',
+				secretAccessKey: 'your-secret-access-key',
+			},
+			requestHandler: new NodeHttpHandler(),
+			region: 'eu-west-2',
+		})
+		this.log = new Log(this.constructor.name, eventId)
+		this.streamName = streamName
+	}
+
+	async publishEvent(eventData: any): Promise<void> {
+		const params: PutRecordInput = {
+			StreamName: this.streamName,
+			Data: new TextEncoder().encode(JSON.stringify(eventData)),
+			PartitionKey: '1',
+		}
+
+		try {
+			await this.kinesis.putRecord(params)
+			this.log.info('Event published successfully')
+		} catch (error) {
+			this.log.error(`Failed to publish event: ${error}`)
+		}
+	}
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/repository/user-limit-inmemorydb-repository.ts
+import { Log } from '../services/logger'
+import { InsufficientAmountLeft, UserLimitDoesNotExist } from '../types/errors'
+import { UserLimitCreatedPayloadType, UserLimitProgressChangedPayloadType, UserLimitResetPayloadType } from '../types/payloads'
+import { UserLimit } from '../types/user-limit'
+import { UserLimitRepositoryInterface } from './user-limit-repository-interface'
+
+export class UserLimitInMemoryDBRepository implements UserLimitRepositoryInterface {
+	private userLimitCollection?: Map<string, UserLimit>
+	private log: Log
+
+	constructor(eventId?: string) {
+		this.userLimitCollection = new Map<string, UserLimit>()
+		this.log = new Log(this.constructor.name, eventId)
+	}
+
+	async saveUserLimit(payload: UserLimitCreatedPayloadType) {
+		// for now always save new limit, even if it already exists
+
+		// if (await this.getUserLimit(payload.userLimitId)) {
+		// 	throw new UserLimitAlreadyExists(`Limit: ${payload.userLimitId}, already exists in the database`)
+		// }
+
+		this.log.info(`Saving user limit: ${payload.userLimitId}`)
+		this.userLimitCollection.set(payload.userLimitId, payload as UserLimit)
+		return this.getUserLimit(payload.userLimitId)
+	}
+
+	async updateUserLimitProgress(payload: UserLimitProgressChangedPayloadType) {
+		const existingUserLimit = await this.getUserLimit(payload.userLimitId)
+
+		if (!existingUserLimit) {
+			throw new UserLimitDoesNotExist(`Limit: ${payload.userLimitId}, does not exist in the database`)
+		}
+
+		this.log.info(`Updating user limit progress: ${payload.userLimitId}`)
+		const newAmount = Number(existingUserLimit.value) - Number(payload.amount ?? 0)
+
+		if (newAmount < 0) {
+			throw new InsufficientAmountLeft(`Insufficient amount left in limit: ${payload.userLimitId}`)
+		}
+
+		existingUserLimit.progress = newAmount.toString()
+		this.userLimitCollection.set(payload.userLimitId, existingUserLimit)
+		return this.getUserLimit(payload.userLimitId)
+	}
+
+	async resetUserLimit(payload: UserLimitResetPayloadType) {
+		const existingUserLimit = await this.getUserLimit(payload.userLimitId)
+
+		if (!existingUserLimit) {
+			throw new UserLimitDoesNotExist(`Limit: ${payload.userLimitId}, does not exist in the database`)
+		}
+
+		this.log.info(`Resetting user limit: ${payload.userLimitId}`)
+		existingUserLimit.progress = payload.resetAmount
+		existingUserLimit.nextResetTime = payload.nextResetTime
+
+		this.userLimitCollection.set(payload.userLimitId, existingUserLimit)
+		return this.getUserLimit(payload.userLimitId)
+	}
+
+	// fake async function to simulate a database call
+	async getUserLimit(key: string): Promise<UserLimit> {
+		this.log.info(`Getting user limit: ${key}`)
+		const limit = this.userLimitCollection.get(key)
+		return limit
+	}
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/repository/user-limit-dynamodb-repository.ts
+import { PutItemCommand, GetItemCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { marshall, unmarshall } from '@aws-sdk/util-dynamodb'
+import { UserLimitCreatedPayloadType, UserLimitProgressChangedPayloadType, UserLimitResetPayloadType } from '../types/payloads'
+import { UserLimit } from '../types/user-limit'
+import { UserLimitRepositoryInterface } from './user-limit-repository-interface'
+import { Log } from '../services/logger'
+
+class UserLimitDynamoDBRepository implements UserLimitRepositoryInterface {
+	private client: DynamoDBClient
+	private log: Log
+
+	constructor(eventId?: string) {
+		this.client = new DynamoDBClient()
+		this.log = new Log(this.constructor.name, eventId)
+	}
+
+	async saveUserLimit(record: UserLimitCreatedPayloadType) {
+		const params = {
+			TableName: 'userLimit',
+			Item: marshall(record),
+		}
+
+		try {
+			const result = await this.client.send(new PutItemCommand(params))
+			return unmarshall(result.Attributes) as UserLimit
+		} catch (error) {
+			this.log.error(error)
+			throw error
+		}
+	}
+
+	async updateUserLimitProgress(payload: UserLimitProgressChangedPayloadType) {
+		const params = {
+			TableName: 'userLimit',
+			Key: {
+				userLimitId: { S: payload.userLimitId },
+			},
+			UpdateExpression: 'set progress = :p',
+			ExpressionAttributeValues: {
+				':p': { N: (Number(payload.previousProgress) + Number(payload.amount)).toString() },
+			},
+			Item: marshall(payload),
+		}
+
+		try {
+			const result = await this.client.send(new PutItemCommand(params))
+			return unmarshall(result.Attributes) as UserLimit
+		} catch (error) {
+			this.log.error(error)
+			throw error
+		}
+	}
+
+	async resetUserLimit(payload: UserLimitResetPayloadType) {
+		const params = {
+			TableName: 'userLimit',
+			Key: {
+				userLimitId: { S: payload.userLimitId },
+			},
+			ExpressionAttributeValues: {
+				':resetAmount': { S: payload.resetAmount },
+				':nextResetTime': { S: payload.nextResetTime.toString() },
+			},
+			ConditionExpression: 'progress = :resetAmount AND nextResetTime = :nextResetTime',
+			Item: marshall(payload),
+		}
+
+		try {
+			const result = await this.client.send(new PutItemCommand(params))
+			return unmarshall(result.Attributes) as UserLimit
+		} catch (error) {
+			this.log.error(error.info)
+			throw error
+		}
+	}
+
+	async getUserLimit(key: string) {
+		const params = {
+			TableName: 'userLimit',
+			Key: {
+				userLimitId: { S: key },
+			},
+		}
+
+		try {
+			const result = await this.client.send(new GetItemCommand(params))
+			return unmarshall(result.Item) as UserLimit
+		} catch (error) {
+			this.log.error(error)
+			throw error
+		}
+	}
+}
+
+export default UserLimitDynamoDBRepository
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/repository/user-limit-repository-interface.ts
+import { UserLimitCreatedPayloadType, UserLimitProgressChangedPayloadType, UserLimitResetPayloadType } from '../types/payloads'
+import { UserLimit } from '../types/user-limit'
+
+export interface UserLimitRepositoryInterface {
+	saveUserLimit(payload: UserLimitCreatedPayloadType): Promise<UserLimit>
+	updateUserLimitProgress(payload: UserLimitProgressChangedPayloadType): Promise<UserLimit>
+	resetUserLimit(payload: UserLimitResetPayloadType): Promise<UserLimit>
+	getUserLimit(key: string): Promise<UserLimit>
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/types/errors.ts
+export class NoDatabaseInitializedError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'NoDatabaseInitializedError'
+	}
+}
+
+export class InvalidUserCreatedPayloadError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'InvalidUserCreatedPayloadError'
+	}
+}
+
+export class InvalidUserProgressChangedPayloadError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'InvalidUserProgressChangedPayloadError'
+	}
+}
+
+export class InvalidUserResetPayloadError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'InvalidUserResetPayloadError'
+	}
+}
+
+export class UserLimitAlreadyExists extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'UserLimitAlreadyExists'
+	}
+}
+
+export class UserLimitDoesNotExist extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'UserLimitDoesNotExist'
+	}
+}
+
+export class UnknownTypeError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'UnknownTypeError'
+	}
+}
+
+export class InvalidEventTypeError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'InvalidEventTypeError'
+	}
+}
+
+export class InsufficientAmountLeft extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'InsufficientAmountLeft'
+	}
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/types/payloads.ts
+import { z } from 'zod'
+import { LimitPeriod, LimitStatus, LimitType } from './user-limit'
+import { UserLimitEventType } from './events'
+import { InvalidEventTypeError } from './errors'
+
+const commonSchema = z.object({
+	brandId: z.string(),
+	currencyCode: z.string(),
+	userId: z.string(),
+	userLimitId: z.string(),
+})
+
+const UserLimitCreatedPayloadSchema = commonSchema.extend({
+	activeFrom: z.number(),
+	activeUntil: z.number().optional(),
+	createdAt: z.number().optional(),
+	nextResetTime: z.number().optional(),
+	period: z.nativeEnum(LimitPeriod),
+	status: z.nativeEnum(LimitStatus),
+	type: z.nativeEnum(LimitType),
+	value: z.string(),
+	previousLimitValue: z.string().optional(),
+	progress: z.string().optional(),
+})
+
+export type UserLimitCreatedPayloadType = z.infer<typeof UserLimitCreatedPayloadSchema>
+
+const UserLimitProgressChangedPayloadSchema = commonSchema.extend({
+	amount: z.string(),
+	nextResetTime: z.number(),
+	previousProgress: z.string(),
+	remainingAmount: z.string().optional(),
+})
+
+export type UserLimitProgressChangedPayloadType = z.infer<typeof UserLimitProgressChangedPayloadSchema>
+
+const UserLimitResetPayloadSchema = commonSchema.extend({
+	nextResetTime: z.number(),
+	period: z.nativeEnum(LimitPeriod),
+	resetAmount: z.string(),
+	resetPercentage: z.string(),
+	type: z.nativeEnum(LimitType),
+	unusedAmount: z.string(),
+})
+
+export type UserLimitResetPayloadType = z.infer<typeof UserLimitResetPayloadSchema>
+
+export function validateSchema<T>(data: T, type: UserLimitEventType): data is T {
+	try {
+		let schema: typeof commonSchema
+
+		switch (type) {
+			case UserLimitEventType.USER_LIMIT_CREATED:
+				schema = UserLimitCreatedPayloadSchema
+				break
+			case UserLimitEventType.USER_LIMIT_PROGRESS_CHANGED:
+				schema = UserLimitProgressChangedPayloadSchema
+				break
+			case UserLimitEventType.USER_LIMIT_RESET:
+				schema = UserLimitResetPayloadSchema
+				break
+			default:
+				throw new InvalidEventTypeError('Invalid event type')
+		}
+
+		schema.parse(data)
+		return true
+	} catch (error) {
+		throw new Error(`Validation failed: ${JSON.stringify(error.formErrors.fieldErrors)}`)
+	}
+}
+
+export type UserLimitPayloadType = UserLimitCreatedPayloadType | UserLimitProgressChangedPayloadType | UserLimitResetPayloadType
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/types/user-limit.ts
+export enum LimitStatus {
+	ACTIVE = 'ACTIVE',
+	CANCELED = 'CANCELED',
+	FUTURE = 'FUTURE',
+	IN_COOLDOWN = 'IN_COOLDOWN',
+}
+
+export enum LimitPeriod {
+	CALENDAR_DAY = 'CALENDAR_DAY',
+	CALENDAR_WEEK = 'CALENDAR_WEEK',
+	CALENDAR_MONTH = 'CALENDAR_MONTH',
+	DAY = 'DAY',
+	INDEFINITE = 'INDEFINITE',
+	INSTANCE = 'INSTANCE',
+	WEEK = 'WEEK',
+	MONTH = 'MONTH',
+}
+
+export enum LimitType {
+	BALANCE = 'BALANCE',
+	BET = 'BET',
+	DEPOSIT = 'DEPOSIT',
+	LOSS = 'LOSS',
+	SESSION = 'SESSION',
+}
+
+export interface UserLimit {
+	activeFrom: number
+	activeUntil?: number
+	brandId: string
+	createdAt?: number
+	currencyCode: string
+	nextResetTime?: number
+	period: LimitPeriod
+	previousLimitValue?: string
+	progress?: string
+	status: LimitStatus
+	type: LimitType
+	userId: string
+	userLimitId: string
+	value: string
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/types/events.ts
+import { UserLimitPayloadType } from './payloads'
+import { UserLimitCreatedPayloadType, UserLimitProgressChangedPayloadType, UserLimitResetPayloadType } from './payloads'
+
+export class UserLimitKinesisEvent {
+	aggregateId: string
+	context: object
+	createdAt: number
+	eventId: string
+	data: UserLimitPayloadType
+	sequenceNumber: number
+	source: string
+	type: UserLimitEventType
+}
+
+export class UserLimitCreatedEvent extends UserLimitKinesisEvent {
+	data: UserLimitCreatedPayloadType
+}
+
+export class UserLimitProgressChangedEvent extends UserLimitKinesisEvent {
+	data: UserLimitProgressChangedPayloadType
+}
+
+export class UserLimitResetEvent extends UserLimitKinesisEvent {
+	data: UserLimitResetPayloadType
+}
+
+export enum UserLimitEventType {
+	USER_LIMIT_CREATED = 'USER_LIMIT_CREATED',
+	USER_LIMIT_PROGRESS_CHANGED = 'USER_LIMIT_PROGRESS_CHANGED',
+	USER_LIMIT_RESET = 'USER_LIMIT_RESET',
+}
+
+export function assertEvent(event: any): event is UserLimitKinesisEvent {
+	return event.eventId && event.data && event.sequenceNumber && event.source
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/local.ts
+import { _Record } from '@aws-sdk/client-kinesis'
+import { handler } from '.'
+import events from '../events.json'
+
+const UserLimitKinesisEvents = []
+events.forEach(event => {
+	UserLimitKinesisEvents.push({
+		kinesis: {
+			data: Buffer.from(JSON.stringify(event)).toString('base64'),
+		},
+	})
+})
+
+void handler({ Records: UserLimitKinesisEvents }, null, null)
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/index.ts
+import { KinesisStreamEvent, Context, KinesisStreamHandler, KinesisStreamRecordPayload, KinesisStreamRecord } from 'aws-lambda'
+import { Buffer } from 'buffer'
+import { Logger } from '@aws-lambda-powertools/logger'
+import { UserLimitEventType, UserLimitKinesisEvent, assertEvent } from './types/events'
+import { config } from 'dotenv'
+import { UserLimitEventHandlerService } from './services/event-handlers/user-limit-event-handler-service'
+import { AWSKinesisClient } from './clients/aws-kinesis-client'
+import { handle } from './domain'
+import { UserLimitInMemoryDBRepository } from './repository/user-limit-inmemorydb-repository'
+import UserLimitDynamoDBRepository from './repository/user-limit-dynamodb-repository'
+
+config({
+	path: './config/.env',
+})
+
+const logger = new Logger({
+	logLevel: 'INFO',
+	serviceName: 'kinesis-stream-handler',
+})
+
+type ExtendedKinesisStreamRecord = KinesisStreamRecord & { type: UserLimitEventType }
+
+export const handler: KinesisStreamHandler = async (event: KinesisStreamEvent, _context: Context): Promise<void> => {
+	for (const record of event.Records as ExtendedKinesisStreamRecord[]) {
+		try {
+			const recordData = getRecordData(record.kinesis)
+
+			logger.addPersistentLogAttributes({ eventId: recordData.eventId })
+
+			if (!assertEvent(recordData)) {
+				logger.error(`Invalid record data: ${recordData}`)
+				throw new Error('Invalid record data')
+			}
+
+			logger.info(`Processed Kinesis Event - EventID: ${recordData.eventId}`)
+
+			const kinesisClient = new AWSKinesisClient('user-limit-events', recordData.eventId)
+			const userLimitRepository =
+				process.env.DB === 'inMemory' ? new UserLimitInMemoryDBRepository(recordData.eventId) : new UserLimitDynamoDBRepository(recordData.eventId)
+			const recordHandlerService = new UserLimitEventHandlerService(userLimitRepository, kinesisClient, recordData.eventId)
+
+			await handle(recordHandlerService, {
+				data: recordData.data,
+				type: recordData.type,
+			})
+		} catch (err) {
+			logger.error(`An error occurred ${err}`)
+			// Decide here what we want to do with the error, retry or send to SQS DLQ...
+		}
+
+		process.env.NODE_ENV !== 'test' ? console.log('------------------') : null
+	}
+
+	logger.info(`Successfully processed ${event.Records.length} records.`)
+}
+
+function getRecordData(payload: KinesisStreamRecordPayload): UserLimitKinesisEvent {
+	try {
+		const data = Buffer.from(payload.data, 'base64').toString('utf-8')
+		return JSON.parse(data)
+	} catch (error) {
+		logger.error(`An error occurred ${error}`)
+		throw error
+	}
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/domain.ts
+import { UserLimitEventHandlerService } from './services/event-handlers/user-limit-event-handler-service'
+import { UserLimitEventType } from './types/events'
+import { UserLimitPayloadType } from './types/payloads'
+
+export const handle = async (
+	userLimitEventHandlerService: UserLimitEventHandlerService,
+	payload: {
+		data: UserLimitPayloadType
+		type: UserLimitEventType
+	}
+) => {
+	return userLimitEventHandlerService.handle(payload.data, payload.type)
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/services/logger.ts
+import { Logger } from '@aws-lambda-powertools/logger'
+
+export class Log {
+	private logger: Logger
+
+	constructor(serviceName: string, eventId: string) {
+		this.logger = new Logger({ serviceName })
+		this.logger.addPersistentLogAttributes({ eventId })
+	}
+
+	info(message: string) {
+		if (process.env.NODE_ENV === 'test') {
+			return this.logger.debug(message)
+		}
+		this.logger.info(message)
+	}
+
+	error(message: string) {
+		this.logger.error(message)
+	}
+
+	warn(message: string) {
+		this.logger.warn(message)
+	}
+}
+
+
+
+File: /Users/leonardoteixeiradossantos/Dev/Tests/kinesis-handler/src/services/event-handlers/user-limit-event-handler-service.ts
+import {
+	UserLimitCreatedPayloadType,
+	UserLimitPayloadType,
+	UserLimitProgressChangedPayloadType,
+	UserLimitResetPayloadType,
+	validateSchema,
+} from '../../types/payloads'
+import { UserLimitEventType } from '../../types/events'
+import { InvalidUserCreatedPayloadError, InvalidUserProgressChangedPayloadError, InvalidUserResetPayloadError } from '../../types/errors'
+import { UserLimitRepositoryInterface } from '../../repository/user-limit-repository-interface'
+import { Log } from '../logger'
+import { AWSKinesisClient } from '../../clients/aws-kinesis-client'
+
+export class UserLimitEventHandlerService {
+	private userLimitRepository: UserLimitRepositoryInterface
+	private log: Log
+	private kinesisClient: AWSKinesisClient
+
+	constructor(userLimitRepository: UserLimitRepositoryInterface, kinesisClient?: AWSKinesisClient, eventId?: string) {
+		this.log = new Log(this.constructor.name, eventId)
+		this.userLimitRepository = userLimitRepository
+		this.kinesisClient = kinesisClient
+	}
+
+	public async handle(payload: UserLimitPayloadType, type: UserLimitEventType): Promise<boolean> {
+		try {
+			switch (type) {
+				case UserLimitEventType.USER_LIMIT_CREATED:
+					this.log.info(`UserLimitCreated event ${payload}`)
+					await this.handleUserLimitCreated(payload)
+					return true
+				case UserLimitEventType.USER_LIMIT_PROGRESS_CHANGED:
+					this.log.info(`UserLimitProgressChanged event ${payload}`)
+					await this.handleUserLimitProgressChanged(payload)
+					return true
+				case UserLimitEventType.USER_LIMIT_RESET:
+					this.log.info(`UserLimitReset event ${payload}`)
+					await this.handleUserLimitReset(payload)
+					return true
+				default:
+					this.log.error(`Unknown event type: ${type}`)
+					// We don't want to throw an error here, when we receive an unknown event type we just want to log it and return false
+					return false
+			}
+		} catch (error) {
+			this.log.error(`An error occurred: ${error}`)
+			// Decide here what we want to do with the error, retry or send to SQS DLQ...
+			await this.kinesisClient?.publishEvent(error)
+			throw error
+		}
+	}
+
+	private async handleUserLimitCreated(payload: UserLimitCreatedPayloadType) {
+		if (!validateSchema<UserLimitCreatedPayloadType>(payload, UserLimitEventType.USER_LIMIT_CREATED)) {
+			this.log.error('Invalid UserLimitCreated payload')
+			throw new InvalidUserCreatedPayloadError('Invalid UserLimitCreated payload')
+		}
+
+		await this.userLimitRepository.saveUserLimit(payload)
+	}
+
+	private async handleUserLimitProgressChanged(payload: UserLimitProgressChangedPayloadType) {
+		if (!validateSchema<UserLimitProgressChangedPayloadType>(payload, UserLimitEventType.USER_LIMIT_PROGRESS_CHANGED)) {
+			this.log.error('Invalid UserLimitProgressChanged event')
+			throw new InvalidUserProgressChangedPayloadError('Invalid UserLimitProgressChanged event')
+		}
+
+		await this.userLimitRepository.updateUserLimitProgress(payload)
+	}
+
+	private async handleUserLimitReset(payload: UserLimitResetPayloadType) {
+		if (!validateSchema<UserLimitResetPayloadType>(payload, UserLimitEventType.USER_LIMIT_RESET)) {
+			this.log.error('Invalid UserLimitReset payload')
+			throw new InvalidUserResetPayloadError('Invalid UserLimitReset payload')
+		}
+
+		await this.userLimitRepository.resetUserLimit(payload)
+	}
+}
+
+
+

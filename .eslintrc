@@ -1,0 +1,90 @@
+{
+	"root": true,
+	"parser": "@typescript-eslint/parser",
+	"parserOptions": {
+		"project": "./tsconfig.json",
+	},
+	"plugins": [
+		"@typescript-eslint",
+		"prettier"
+	],
+	"extends": [
+		"eslint:recommended",
+		"plugin:@typescript-eslint/eslint-recommended",
+		"plugin:@typescript-eslint/recommended"
+	],
+	"env": {
+		"node": true,
+		"es6": true,	
+		"jest": true
+	},
+	"globals": {
+		"NodeJS": true
+	},	
+	"rules": {
+		"camelcase": "off",
+		"comma-dangle": ["off", "always-multiline"],
+		"comma-spacing": "warn",
+		"eqeqeq": "error",
+		"key-spacing": "warn",
+		"keyword-spacing": "warn",
+		"dot-notation": "off",
+		"no-console": "error",
+		"eol-last": "warn",
+		"new-cap": "off",
+		"no-case-declarations": "off",
+		"no-dupe-args": "error",
+		"no-dupe-class-members": "error",
+		"no-empty": [
+			"warn",
+			{
+				"allowEmptyCatch": true
+			}
+		],
+		"no-mixed-requires": "off",
+		"no-mixed-spaces-and-tabs": "warn",
+		"no-process-console": "off",
+		"no-process-exit": "off",
+		"no-shadow": "off",
+		"no-underscore-dangle": "off",
+		"no-unused-expressions": "off",
+		"no-unused-vars": "off",
+		"quotes": [
+			"off",
+			"single",
+			{
+				"avoidEscape": true,
+				"allowTemplateLiterals": true
+			}
+		],
+		"space-infix-ops": "off",
+		"strict": "off",
+		"no-fallthrough": "off",
+		"no-sync": "off",
+		"one-var": "off",
+		"semi": "off",
+		"radix": "off",
+		"vars-on-top": "off",
+		"yoda": "warn",
+		"no-constant-condition": "warn",
+		"no-unreachable": "warn",
+		"no-useless-escape": "off",
+		"no-restricted-globals": "off",
+		"no-debugger": "warn",
+		"no-control-regex": "off",
+		"default-case": "warn",
+		"prettier/prettier": "off",
+		"@typescript-eslint/no-explicit-any": "off",
+		"@typescript-eslint/explicit-module-boundary-types": "off",
+		"@typescript-eslint/ban-types": "off",
+		"@typescript-eslint/no-floating-promises": "warn",
+		"@typescript-eslint/no-unused-vars": [
+			"warn", 
+			{ 
+			  "argsIgnorePattern": "^_",
+			  "varsIgnorePattern": "^_",
+			  "caughtErrorsIgnorePattern": "^_"
+			}
+		  ]
+	}
+}

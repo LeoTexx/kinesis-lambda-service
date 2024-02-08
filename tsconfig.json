@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "incremental": false,
+    "target": "ES2015",
+    "module": "CommonJS",
+    "declaration": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./build",
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  },
+  "exclude": ["node_modules", "build"]
+}

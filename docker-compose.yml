@@ -1,0 +1,21 @@
+version: '3'
+services:
+  kinesalite:
+    build:
+      context: .
+      dockerfile: Dockerfile.kinesalite
+    ports:
+      - "4567:4567"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - AWS_ACCESS_KEY_ID=your_access_key_id
+      - AWS_SECRET_ACCESS_KEY=your_secret_access_key
+      - AWS_REGION=eu-west-2
+    ports:
+      - "9002:8080"
+    depends_on:
+      - kinesalite

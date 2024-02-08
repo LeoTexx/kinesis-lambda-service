@@ -1,0 +1,19 @@
+FROM node:18
+
+# Set the working directory
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y awscli
+
+# Install kinesalite globally
+RUN npm install -g kinesalite
+
+# Expose port 4567
+EXPOSE 4567
+
+COPY ./entrypoint_kinesalite.sh ./entrypoint_kinesalite.sh
+
+RUN chmod +x ./entrypoint_kinesalite.sh
+
+# Run kinesalite on port 4567
+ENTRYPOINT ["./entrypoint_kinesalite.sh"]
