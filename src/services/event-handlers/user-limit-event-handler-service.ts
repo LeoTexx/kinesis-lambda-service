@@ -10,9 +10,9 @@ export class UserLimitEventHandlerService {
 	private log: Log
 	private kinesisClient: AWSKinesisClient
 
-	constructor(userLimitRepository: UserLimitRepositoryInterface, kinesisClient?: AWSKinesisClient) {
+	constructor(userLimitRepository: UserLimitRepositoryInterface, kinesisClient?: AWSKinesisClient, eventId?: string) {
 		this.userLimitRepository = userLimitRepository
-		this.log = new Log(this.constructor.name)
+		this.log = new Log(this.constructor.name, eventId)
 		this.kinesisClient = kinesisClient
 	}
 
